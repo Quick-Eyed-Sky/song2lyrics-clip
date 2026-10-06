@@ -1,6 +1,6 @@
 # Song2Lyrics Clip — user guide
 
-*Version 0.9 · macOS 14 or later · Apple Silicon*
+*Version 0.14.1 · macOS 14 or later · Apple Silicon*
 
 Song2Lyrics Clip is a small Mac app. Drop a song on its window and it writes down the
 **sung words with their timing**, as `.lrc`, `.srt` and `.txt` files, in a few
@@ -67,7 +67,7 @@ curl -L -o ~/.cache/whisper.cpp/ggml-large-v3-turbo.bin \
 
 ### 2.2 First launch
 
-Download `Song2Lyrics-Clip-0.9-macos-arm64.zip` from the [Releases page](https://github.com/Quick-Eyed-Sky/song2lyrics-clip/releases/latest), unzip it, drag `Song2Lyrics Clip.app` into your Applications folder and double-click it. The
+Download `Song2Lyrics-Clip-0.14.1-macos-arm64.zip` from the [Releases page](https://github.com/Quick-Eyed-Sky/song2lyrics-clip/releases/latest), unzip it, drag `Song2Lyrics Clip.app` into your Applications folder and double-click it. The
 app is not notarised by Apple, so the first time macOS may refuse to open it:
 open **System Settings › Privacy & Security** and click **Open Anyway**. You
 only do this once ([why, and other ways](macos-security.md)).
@@ -88,21 +88,29 @@ To keep it at hand, drag it to the Dock. Closing the window quits the app.
 
 ## 4. The window
 
-The window has three columns.
+The window has three columns. Drag the wide handle between two columns to make
+one wider or narrower; at every opening the settings columns have the same
+width, fitted to your screen.
 
-**Left: settings and songs.** The transcription settings (section 5), then the
-list of songs you dropped, with their state: waiting, listening, done, failed.
-A blue dot marks a song edited but not saved yet. Right-click a song to
-transcribe it again, show it in the Finder or remove it from the list (its
-files stay where they are). *Clear Finished* empties the list of finished songs.
-While songs are being transcribed, a **Stop** button appears at the bottom.
+**Left: settings, post-processing and songs.**
+- The transcription settings (section 5).
+- **Post-processing**: the big green **Show in Finder** button, then *Save*,
+  *TextEdit*, *Copy Lyrics*, *Copy + Times*, the *QuickTime* and *Green Screen*
+  videos (section 9), and *Transcribe Again*.
+- The list of songs you dropped, with their state: waiting, listening, done,
+  failed. A blue dot marks a song edited but not saved yet. Right-click a song
+  to transcribe it again, show it in the Finder or remove it from the list (its
+  files stay where they are). *Clear Finished* empties the list of finished
+  songs. While songs are being transcribed, a **Stop** button appears at the
+  bottom.
 
 **Middle: the lyrics of the selected song.** Its name, a **Lyrics in …** link to
 its folder, the player with the song's **tempo**, then the timed lines.
 
-**Right: post-processing.** The big green **Show in Finder** button, then the
-lyrics buttons, the lyric video and its settings, the other videos, and
-*Transcribe Again*.
+**Right: the lyric video**, in two halves (section 8): *Pictures*, *Format* and
+*Movement* on the left; *Start*, *End*, *Words Style* and *Words and Sound* on
+the right. The big orange **Make the Video** button stays at the bottom, always
+in sight.
 
 Three ways to give songs: **drop them on the window** (a folder includes its
 sub-folders), **drop them on the app's icon** in the Dock or the Finder, or
@@ -182,7 +190,14 @@ in three steps:
 
 | Setting | What it does |
 |---|---|
-| **Format** (small icons, two rows) | Top row, landscape: 16:9 (YouTube, iMovie), 3:2 (photo cameras), 4:3, 5:4 and square 1:1. Bottom row, portrait: 9:16 (TikTok, Reels, Shorts), 2:3, 3:4, 4:5 (Instagram feed). The short side is always 1080 pixels (16:9 is 1920 × 1080). The crop or black-bar rule is the same for every format. In portrait formats the words sit higher, clear of the apps' buttons. |
+| **Format** (small icons, two rows) | Top row, landscape: 16:9 (YouTube, iMovie), 3:2 (photo cameras), 4:3, 5:4 and square 1:1. Bottom row, portrait: 9:16 (TikTok, Reels, Shorts), 2:3, 3:4, 4:5 (Instagram feed). The short side is always 1080 pixels (16:9 is 1920 × 1080). The crop or black-bar rule is the same for every format. In 9:16 the words sit a little higher, clear of the apps' buttons. |
+| **1080p · 720p** | Under the formats. 1080p (default): the short side is 1080 pixels, full HD. 720p: 1280 × 720 in 16:9, smaller files, quicker to make and to send. |
+| **Fade in from black / white, N s** | At the start, the picture comes in from black or white. |
+| **Title — appears after N s, for N s** | A title in the middle of the picture, arriving after the delay you give and fading in and out. A title too long for the picture is made smaller, then ends with “…”. Only what you type is shown: an empty line shows nothing. A smaller second line (the artist) is remembered from one video to the next. |
+| **Words Style** | The font (ten choices that stay readable over pictures, plus *All Fonts*), the size (30 to 180 %, 60 % by default), the colour of the words and of their outline, the dark band behind them (*None*, *Light*, *Strong*), and their place (*Top*, *Middle*, *Bottom*). The title follows the same font and colours. A preview redraws after each change, with the first chosen picture and a line of the song. *Reset* goes back to white Avenir Next at 60 %. |
+| **Pulse on the beat** | *Zoom*: a short push of the picture on the beat (up to 8 % at full strength); the words stay still. *Flash*: a brief white flash. Strength in %, and *Every beat*, *Every 2nd* or *Every bar* (every 4 beats). Needs the song's tempo. |
+| **Fade to black / white, N s** | At the end of the video, the picture and the words fade to black or white over N seconds. |
+| **Fade the sound out, N s** | The sound fades to silence over the last N seconds. With the original sound it is then re-encoded: losslessly from a WAV (still a `.mov`), as AAC 320 kb/s from an MP3. |
 | **Crop pictures to fill the frame** | On: each picture is cropped to fill the frame. Off: each picture is shown whole, with black bars (ideal for square pictures in a 16:9 video). |
 | **Ken Burns effect** | Each picture slowly zooms (in, then out on the next one) while drifting in a straight line at a steady speed. The slider goes from *Very light* (4 % zoom) to *Pronounced* (25 %). Takes longer to make: about 1 min 40 for a 2-minute song. |
 | **Ken Burns › On N % of the pictures** | Only a share of the pictures move (20 % by default), drawn at random; the others stay still. 100 % moves them all. |

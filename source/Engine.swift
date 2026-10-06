@@ -9,7 +9,7 @@ import Foundation
 enum AppInfo {
     /// The name comes from the app's Info.plist, so that the same code builds under another name.
     static let name = Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "Song2Lyrics Clip"
-    static let version = "0.9"
+    static let version = "0.14.1"
     static let engineName = "Whisper large-v3-turbo"
 }
 
@@ -57,7 +57,8 @@ enum Paths {
     private static var foundVideoTools = false
 
     /// False when no Python with numpy and Pillow was found: lyric videos and the tempo are then unavailable.
-    /// (Asking for it looks for the Python first: it must never answer before the search has been made.)
+    /// Asking for it makes the search first, which starts programs and waits for them: never call it from a view's
+    /// body (the window would be redrawn in the middle of the search). LyricsModel asks once, in the background.
     static var hasVideoTools: Bool { _ = python; return foundVideoTools }
 
     /// Folders the app never writes into, even with "Next to each song" (reference material). Set with

@@ -58,8 +58,17 @@ clip. Everything runs on your Mac: no account, no upload.
 - **Ken Burns** on a share of the pictures (slow zoom and a straight, steady
   drift), **crossfades** on a share of the cuts.
 - **Nine formats**, from 16:9 through 3:2, 4:3, 5:4 and 1:1 to 4:5, 3:4, 2:3
-  and 9:16 for TikTok, Reels and Shorts. Pictures cropped to fill the frame, or
-  shown whole with black bars.
+  and 9:16 for TikTok, Reels and Shorts, in **1080p or 720p**. Pictures cropped
+  to fill the frame, or shown whole with black bars.
+- **A pulse on the beat**: a short zoom or flash on every beat, every second
+  beat or every bar, at the strength you choose.
+- **An opening and an ending**: a fade in from black or white, a title (and a
+  smaller second line) that arrives after the delay you give, a fade out to
+  black or white, and the sound fading to silence.
+- **Your own style for the words**: ten fonts chosen to stay readable over
+  pictures (or any font of your Mac), size, colour, outline colour, a dark band
+  behind them or none, at the bottom, in the middle or at the top, with a live
+  preview on your own picture.
 - **With or without the words**, to finish the montage yourself in iMovie.
 - **The song's original sound**, untouched, or AAC in an `.mp4` for Discord and
   the web (or both).
@@ -148,9 +157,11 @@ It takes a few seconds and puts `Song2Lyrics Clip.app` in the `song2lyrics-clip`
 
 | Where | What |
 |---|---|
-| **Left** | Language (detected, or forced), *Isolate the voice first*, where the lyrics go (Movies › Lyrics, next to each song, or a folder of your choice), the `.txt` with or without times. Then the list of songs. |
+| **Left** | Language (detected, or forced), *Isolate the voice first*, where the lyrics go (Movies › Lyrics, next to each song, or a folder of your choice), the `.txt` with or without times. Then **post-processing**: a big **Show in Finder** button, Save, TextEdit, Copy (with or without times), the QuickTime and iMovie videos, *Transcribe Again*. Then the list of songs. |
 | **Middle** | The selected song: a link to its folder, the player with its **tempo**, the timed lines to check and correct. |
-| **Right** | A big **Show in Finder** button, Save, Copy (with or without times), Open in TextEdit; the **Lyric Video** maker and its settings; the QuickTime and iMovie videos; *Transcribe Again*. |
+| **Right** | The **Lyric Video** maker, in two halves: *Pictures*, *Format*, *Movement* / *Start*, *End*, *Words Style*, *Words and Sound*, with the **Make the Video** button always in sight at the bottom. |
+
+Drag the wide handles between the columns to resize them.
 
 Every setting is remembered from one launch to the next. The
 **[user guide](docs/USER_GUIDE.md)** explains each one, where the cuts fall,

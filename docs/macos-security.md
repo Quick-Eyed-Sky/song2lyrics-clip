@@ -54,7 +54,7 @@ downloaded, so macOS never asks about it. See option 3 below.)
 The warning cannot tell you, and its absence on other apps does not tell you
 either. What you can do instead of trusting me:
 
-- **Read the source.** It is all in [`source/`](../source): about 2,000 lines
+- **Read the source.** It is all in [`source/`](../source): about 2,500 lines
   of Swift in three files, two Python scripts, and the build script. There is
   **no network code** in it: the app never connects to anything. It starts
   only the programs you installed yourself (whisper.cpp, ffmpeg, Python), and

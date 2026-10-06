@@ -17,7 +17,7 @@ struct SongLyricsApp: App {
         Window("\(AppInfo.name) \(AppInfo.version)", id: "main") {
             ContentView().environmentObject(model).environmentObject(player)
         }
-        .defaultSize(width: 1240, height: 820)
+        .defaultSize(ColumnWidths.windowSize)
         .commands {
             CommandGroup(replacing: .newItem) {
                 Button("Open Songs…") { model.chooseFiles() }.keyboardShortcut("o")
@@ -124,13 +124,17 @@ enum ClipFormat: String, CaseIterable, Identifiable {
         let parts = rawValue.split(separator: ":").compactMap { Double($0) }
         return (parts[0], parts[1])
     }
+    /// The short side in pixels: 1080 (full HD, the default) or 720. Set by the model from the Resolution choice.
+    static var short = 1080
+
     var pixels: (w: Int, h: Int) {
         let (w, h) = ratio
+        let s = Double(ClipFormat.short)
         func even(_ x: Double) -> Int { Int((x / 2).rounded()) * 2 }
-        return w >= h ? (even(1080 * w / h), 1080) : (1080, even(1080 * h / w))
+        return w >= h ? (even(s * w / h), ClipFormat.short) : (ClipFormat.short, even(s * h / w))
     }
     var size: String { "\(pixels.w)x\(pixels.h)" }
-    var tag: String { rawValue.replacingOccurrences(of: ":", with: "x") }
+    var tag: String { rawValue.replacingOccurrences(of: ":", with: "x") + (ClipFormat.short == 1080 ? "" : "_\(ClipFormat.short)p") }
     var help: String {
         let p = "\(pixels.w) × \(pixels.h)"
         switch self {
@@ -169,6 +173,8 @@ final class LyricsModel: ObservableObject {
     @Published var elapsed = 0                      // seconds spent on the current job
     @Published private(set) var videoJob: String?   // "Making the QuickTime video…" while a video is made
     @Published private(set) var videoProgress: Double?
+    /// Whether a Python with numpy and Pillow was found; nil while the search runs (at launch, in the background).
+    @Published private(set) var videoTools: Bool?
 
     // The lyric video's settings, remembered too.
     @Published var clipFormat: ClipFormat = .r16x9 { didSet { remember() } }
@@ -182,7 +188,87 @@ final class LyricsModel: ObservableObject {
     @Published var clipPickCount = 50 { didSet { remember() } }
     @Published var clipShuffle = false { didSet { remember() } }
     @Published var clipCount = 1 { didSet { remember() } }
-    @Published var clipAlsoMP4 = true { didSet { remember() } }   // an .mp4 beside a .mov, for Discord and the web
+    @Published var clipAlsoMP4 = true { didSet { remember() } }
+    @Published var clipShort = 1080 { didSet { ClipFormat.short = clipShort; remember() } }   // 1080p or 720p
+    @Published var endFade = false { didSet { remember() } }
+    @Published var endFadeWhite = false { didSet { remember() } }
+    @Published var endFadeSeconds = 3.0 { didSet { remember() } }
+    @Published var soundFade = false { didSet { remember() } }
+    @Published var soundFadeSeconds = 3.0 { didSet { remember() } }
+    @Published var fadeIn = false { didSet { remember() } }
+    @Published var fadeInWhite = false { didSet { remember() } }
+    @Published var fadeInSeconds = 2.0 { didSet { remember() } }
+    @Published var showTitle = false { didSet { remember() } }
+    @Published var titleText = ""                                 // empty = the song's name (not remembered: one per song)
+    @Published var subtitleText = "" { didSet { remember() } }    // the artist, say: remembered
+    @Published var titleSeconds = 4.0 { didSet { remember() } }
+    @Published var titleDelay = 0.0 { didSet { remember() } }     // seconds before the title appears
+    @Published var beatPulse = false { didSet { remember() } }
+    @Published var pulseFlash = false { didSet { remember() } }   // false = zoom
+    @Published var pulseStrength = 40.0 { didSet { remember() } } // %
+    @Published var pulseEvery = 4 { didSet { remember() } }
+
+    // How the words look (and the title). Remembered.
+    @Published var wordsFont = "" { didSet { styleChanged() } }          // a PostScript name; "" = Avenir Next
+    @Published var textScale = 0.6 { didSet { styleChanged() } }
+    @Published var textColour = "#FFFFFF" { didSet { styleChanged() } }
+    @Published var outlineColour = "#000000" { didSet { styleChanged() } }
+    @Published var band = 120 { didSet { styleChanged() } }              // 0 none, 120 light, 200 strong
+    @Published var wordsPosition = "bottom" { didSet { styleChanged() } } // bottom, middle, top
+    @Published private(set) var preview: NSImage?
+    @Published private(set) var previewing = false
+    private var previewRun: ScriptRun?
+    private var previewPending: DispatchWorkItem?
+
+    private func styleChanged() {
+        remember()
+        if !isRestoring { schedulePreview() }
+    }
+
+    /// The style as clip.py options: the font is found on the Mac by its name (file and face).
+    func styleArguments() -> [String] {
+        var args = ["--text-scale", String(format: "%.2f", textScale), "--text-colour", textColour,
+                    "--outline-colour", outlineColour, "--band", String(band), "--position", wordsPosition]
+        if let file = FontChoice.file(of: wordsFont) {
+            args += ["--font", file.url.path, "--font-index", String(file.index)]
+        }
+        return args
+    }
+
+    /// A still frame showing the words as they will look, redrawn shortly after a style setting changes.
+    func schedulePreview() {
+        previewPending?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.makePreview() }
+        previewPending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4, execute: work)
+    }
+
+    func makePreview() {
+        guard let clip = Paths.clipScript, videoTools == true else { return }
+        previewRun?.stop()
+        let song = selectedSong
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("song2lyrics-preview-\(UUID().uuidString).png")
+        let (w, h) = clipFormat.ratio
+        let short = 540.0
+        let size = w >= h ? "\(Int(short * w / h / 2) * 2)x\(Int(short))" : "\(Int(short))x\(Int(short * h / w / 2) * 2)"
+        var args = ["still", song?.url.path ?? "", (song?.lines.isEmpty ?? true) ? "-" : (song?.lrcURL?.path ?? "-"),
+                    "--size", size, "--fit", clipCrop ? "fill" : "fit", "--out", out.path]
+        if let first = clipPictures.first { args += ["--image", first.path] }
+        if showTitle {
+            args += ["--title", titleText.trimmingCharacters(in: .whitespaces),
+                     "--subtitle", subtitleText.trimmingCharacters(in: .whitespaces)]
+        }
+        args += styleArguments()
+        previewing = true
+        previewRun = try? ScriptRun(script: clip, arguments: args, onLine: { _ in }, onExit: { [weak self] status, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.previewing = false
+                if status == 0, let image = NSImage(contentsOf: out) { self.preview = image }
+                try? FileManager.default.removeItem(at: out)
+            }
+        })
+    }       // 1 = every beat, 2 = every second beat, 4 = every bar   // an .mp4 beside a .mov, for Discord and the web
     @Published var kenBurnsShare = 20.0 { didSet { remember() } }  // % of the pictures that move
     @Published var crossfades = false { didSet { remember() } }
     @Published var crossfadeShare = 10.0 { didSet { remember() } } // % of the cuts that dissolve       // several videos, each with its own random draw
@@ -226,10 +312,48 @@ final class LyricsModel: ObservableObject {
         clipShuffle = d.bool(forKey: "clipShuffle")
         clipCount = d.object(forKey: "clipCount") as? Int ?? 1
         clipAlsoMP4 = d.object(forKey: "clipAlsoMP4") as? Bool ?? true
+        clipShort = d.object(forKey: "clipShort") as? Int ?? 1080
+        ClipFormat.short = clipShort
+        endFade = d.bool(forKey: "endFade")
+        endFadeWhite = d.bool(forKey: "endFadeWhite")
+        endFadeSeconds = d.object(forKey: "endFadeSeconds") as? Double ?? 3
+        soundFade = d.bool(forKey: "soundFade")
+        soundFadeSeconds = d.object(forKey: "soundFadeSeconds") as? Double ?? 3
+        fadeIn = d.bool(forKey: "fadeIn")
+        fadeInWhite = d.bool(forKey: "fadeInWhite")
+        fadeInSeconds = d.object(forKey: "fadeInSeconds") as? Double ?? 2
+        showTitle = d.bool(forKey: "showTitle")
+        subtitleText = d.string(forKey: "subtitleText") ?? ""
+        titleSeconds = d.object(forKey: "titleSeconds") as? Double ?? 4
+        titleDelay = d.object(forKey: "titleDelay") as? Double ?? 0
+        beatPulse = d.bool(forKey: "beatPulse")
+        pulseFlash = d.bool(forKey: "pulseFlash")
+        pulseStrength = d.object(forKey: "pulseStrength") as? Double ?? 40
+        pulseEvery = d.object(forKey: "pulseEvery") as? Int ?? 4
+        wordsFont = d.string(forKey: "wordsFont") ?? ""
+        textScale = d.object(forKey: "textScale") as? Double ?? 0.6
+        if !d.bool(forKey: "textScaleDefault60") {             // v0.14.1: 60 % became the default size, once
+            textScale = 0.6
+            d.set(true, forKey: "textScaleDefault60")
+        }
+        textColour = d.string(forKey: "textColour") ?? "#FFFFFF"
+        outlineColour = d.string(forKey: "outlineColour") ?? "#000000"
+        band = d.object(forKey: "band") as? Int ?? 120
+        wordsPosition = d.string(forKey: "wordsPosition") ?? "bottom"
+        if !d.bool(forKey: "pulseEveryBarDefault") {          // v0.12: "every bar" became the default, once
+            pulseEvery = 4
+            d.set(true, forKey: "pulseEveryBarDefault")
+        }
         kenBurnsShare = d.object(forKey: "kenBurnsShare") as? Double ?? 20
         crossfades = d.bool(forKey: "crossfades")
         crossfadeShare = d.object(forKey: "crossfadeShare") as? Double ?? 10
         if place == .custom && customFolder == nil { place = .movies }
+        // The search for Python starts other programs and waits for them. It must never run while the window is
+        // being drawn (v0.12 crashed at launch that way), so it runs once, here, away from the main thread.
+        DispatchQueue.global(qos: .userInitiated).async {
+            let found = Paths.hasVideoTools
+            DispatchQueue.main.async { self.videoTools = found; if found { self.schedulePreview() } }
+        }
     }
 
     private func remember() {
@@ -252,6 +376,29 @@ final class LyricsModel: ObservableObject {
         d.set(clipShuffle, forKey: "clipShuffle")
         d.set(clipCount, forKey: "clipCount")
         d.set(clipAlsoMP4, forKey: "clipAlsoMP4")
+        d.set(clipShort, forKey: "clipShort")
+        d.set(endFade, forKey: "endFade")
+        d.set(endFadeWhite, forKey: "endFadeWhite")
+        d.set(endFadeSeconds, forKey: "endFadeSeconds")
+        d.set(soundFade, forKey: "soundFade")
+        d.set(soundFadeSeconds, forKey: "soundFadeSeconds")
+        d.set(fadeIn, forKey: "fadeIn")
+        d.set(fadeInWhite, forKey: "fadeInWhite")
+        d.set(fadeInSeconds, forKey: "fadeInSeconds")
+        d.set(showTitle, forKey: "showTitle")
+        d.set(subtitleText, forKey: "subtitleText")
+        d.set(titleSeconds, forKey: "titleSeconds")
+        d.set(titleDelay, forKey: "titleDelay")
+        d.set(beatPulse, forKey: "beatPulse")
+        d.set(pulseFlash, forKey: "pulseFlash")
+        d.set(pulseStrength, forKey: "pulseStrength")
+        d.set(pulseEvery, forKey: "pulseEvery")
+        d.set(wordsFont, forKey: "wordsFont")
+        d.set(textScale, forKey: "textScale")
+        d.set(textColour, forKey: "textColour")
+        d.set(outlineColour, forKey: "outlineColour")
+        d.set(band, forKey: "band")
+        d.set(wordsPosition, forKey: "wordsPosition")
         d.set(kenBurnsShare, forKey: "kenBurnsShare")
         d.set(crossfades, forKey: "crossfades")
         d.set(crossfadeShare, forKey: "crossfadeShare")
@@ -638,6 +785,13 @@ final class LyricsModel: ObservableObject {
         makeVideo(.lyricVideo, for: id, pictures: clipPictures)
     }
 
+    /// "02_Plateau_jump" -> "Plateau jump": the song's name as a title (numbers in front and underscores go).
+    static func prettyTitle(_ name: String) -> String {
+        var t = name.replacingOccurrences(of: "_", with: " ")
+        if let r = t.range(of: #"^[\d\s.\-]+"#, options: .regularExpression), r.upperBound < t.endIndex { t.removeSubrange(r) }
+        return t.trimmingCharacters(in: .whitespaces)
+    }
+
     /// A file name that is not taken yet: name.mp4, name_2.mp4, ...
     static func freeURL(_ folder: URL, _ name: String, _ ext: String) -> URL {
         var url = folder.appendingPathComponent(name + "." + ext)
@@ -675,6 +829,28 @@ final class LyricsModel: ObservableObject {
             if !clipWords { args.append("--no-words") }
             if clipOriginalSound { args += ["--audio", "original"] }
             if clipOriginalSound && clipAlsoMP4 { args.append("--also-mp4") }
+            if endFade && endFadeSeconds > 0 {
+                args += ["--end-fade", String(format: "%.1f", endFadeSeconds), "--end-colour", endFadeWhite ? "white" : "black"]
+            }
+            if soundFade && soundFadeSeconds > 0 { args += ["--sound-fade", String(format: "%.1f", soundFadeSeconds)] }
+            if fadeIn && fadeInSeconds > 0 {
+                args += ["--fade-in", String(format: "%.1f", fadeInSeconds), "--fade-in-colour", fadeInWhite ? "white" : "black"]
+            }
+            if showTitle && titleSeconds > 0 {
+                // what is typed, and only that: an empty field shows nothing (never the file name)
+                let title = titleText.trimmingCharacters(in: .whitespaces)
+                let second = subtitleText.trimmingCharacters(in: .whitespaces)
+                if !title.isEmpty || !second.isEmpty {
+                    args += ["--title", title, "--subtitle", second,
+                             "--title-start", String(format: "%.1f", titleDelay),
+                             "--title-length", String(format: "%.1f", titleSeconds)]
+                }
+            }
+            args += styleArguments()
+            if beatPulse && pulseStrength > 0 && song.bpm != nil {
+                args += ["--pulse", String(format: "%.2f", pulseStrength / 100), "--pulse-mode", pulseFlash ? "flash" : "zoom",
+                         "--pulse-every", String(pulseEvery)]
+            }
             if kenBurns { args += ["--kb-share", String(format: "%.2f", kenBurnsShare / 100)] }
             if crossfades { args += ["--fades", String(format: "%.2f", crossfadeShare / 100)] }
             // a new seed for every video: which pictures are drawn, which ones move, which cuts dissolve.
@@ -849,19 +1025,22 @@ extension View {
 
 struct ContentView: View {
     @EnvironmentObject var model: LyricsModel
+    @StateObject private var columns = ColumnWidths()
 
     var body: some View {
+        // Four columns. The three settings columns open at the same width (fitted to the screen); drag the
+        // wide handles between them to make one wider or narrower.
         HStack(spacing: 0) {
-            Sidebar().frame(width: 310).sidePanel()
-            Divider()
+            Sidebar().frame(width: columns.left).sidePanel()
+            ColumnHandle(width: $columns.left, direction: 1, range: 260...560)
             Group {
                 if let song = model.selectedSong { SongEditor(songID: song.id) } else { EmptyState() }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider()
-            PostPanel().frame(width: 270).sidePanel()
+            .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+            ColumnHandle(width: $columns.video, direction: -1, range: 540...1100)
+            LyricVideoPanel().frame(width: columns.video).sidePanel()
         }
-        .frame(minWidth: 1100, minHeight: 640)
+        .frame(minWidth: 1180, minHeight: 700)
         .onDrop(of: [.fileURL], isTargeted: $model.dropTargeted, perform: handleDrop)
         .overlay {
             if model.dropTargeted {
@@ -894,6 +1073,54 @@ struct ContentView: View {
     }
 }
 
+/// The widths of the settings columns. At every opening each one (the left column, and each half of the lyric
+/// video column) has the same width, fitted to the screen:
+/// about 380 points each on a large screen, less on a small one (the lyrics in the middle keep at least 560).
+final class ColumnWidths: ObservableObject {
+    static var screen: CGRect { NSScreen.main?.visibleFrame ?? CGRect(x: 0, y: 0, width: 1440, height: 900) }
+    static var windowSize: CGSize {
+        CGSize(width: min(screen.width - 40, 1840), height: min(screen.height - 40, 1000))
+    }
+    static var side: CGFloat { max(260, min(380, (windowSize.width - 560 - 30) / 3)) }
+
+    @Published var left = ColumnWidths.side
+    @Published var video = ColumnWidths.side * 2         // the lyric video settings, in two halves
+}
+
+/// The line between two columns, with a wide grip around it (10 points) and the resize pointer.
+struct ColumnHandle: View {
+    @Binding var width: CGFloat
+    let direction: CGFloat                 // +1: the column on the left grows when dragged right; -1: the one on the right
+    let range: ClosedRange<CGFloat>
+    @StateObject private var drag = DragStart()
+    @StateObject private var hover = HoverBox()
+
+    var body: some View {
+        ZStack {
+            Color.clear
+            Rectangle()
+                .fill(hover.inside ? Color.accentColor : Color(nsColor: .separatorColor))
+                .frame(width: hover.inside ? 3 : 1)
+        }
+        .frame(width: 10)
+        .contentShape(Rectangle())
+        .onHover { inside in
+            hover.inside = inside
+            if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+        }
+        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .global)
+            .onChanged { value in
+                if drag.start == nil { drag.start = width }
+                width = min(range.upperBound, max(range.lowerBound, (drag.start ?? width) + direction * value.translation.width))
+            }
+            .onEnded { _ in drag.start = nil })
+        .help("Drag to make the column wider or narrower")
+    }
+}
+
+final class DragStart: ObservableObject { var start: CGFloat? }
+final class HoverBox: ObservableObject { @Published var inside = false }
+
 // MARK: - Left: settings, then the list of songs
 
 struct Sidebar: View {
@@ -913,7 +1140,9 @@ struct Sidebar: View {
             }
             .padding(16)
             Divider()
-            SongList()
+            PostPanel().padding(16)            // above the songs, whose list can then grow to the bottom
+            Divider()
+            SongList().frame(minHeight: 110, maxHeight: .infinity)
         }
     }
 }
@@ -1328,26 +1557,166 @@ struct EmptyState: View {
     }
 }
 
-// MARK: - Right: post-processing
+// MARK: - Right: post-processing, then the lyric video
 
-/// Everything done with the lyrics once they exist: save, copy, open, videos.
+/// A heading in the right-hand columns, like the left column's: small capitals, a line above.
+struct PanelSection<Content: View>: View {
+    let title: String
+    var first = false
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            if !first { Divider().padding(.bottom, 4) }
+            Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).tracking(0.8)
+            content
+        }
+    }
+}
+
+/// A grey explanation under a setting.
+struct Hint: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// Everything done with the lyrics once they exist, compact, under the list of songs: Show in Finder, save,
+/// copy, open, the other videos, transcribe again.
 struct PostPanel: View {
     @EnvironmentObject var model: LyricsModel
 
     var body: some View {
         let song = model.selectedSong
         let ready = song?.state == .done
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                Text("Post-processing").font(.title3.bold())
+        VStack(alignment: .leading, spacing: 10) {
+            Text("POST-PROCESSING").font(.caption.weight(.semibold)).foregroundStyle(.secondary).tracking(0.8)
+            // The button used all the time: big, coloured, first.
+            Button { if let song { model.reveal(song) } } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "folder.fill").font(.title2)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Show in Finder").font(.headline)
+                        Text("The lyrics and videos of this song").font(.caption).opacity(0.85)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.vertical, 6).padding(.horizontal, 4)
+                .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(Color(red: 0.13, green: 0.62, blue: 0.42))
+            .controlSize(.extraLarge)
+            .disabled(song == nil)
+            .help("Opens the song’s lyrics folder in the Finder, with the latest file selected")
 
-                // The button used all the time: big, coloured, first.
-                Button { if let song { model.reveal(song) } } label: {
+            Grid(horizontalSpacing: 8, verticalSpacing: 8) {
+                GridRow {
+                    Button { model.saveSelected() } label: {
+                        PanelLabel(song?.dirty == true ? "Save Changes" : "Saved", "square.and.arrow.down")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!(song?.dirty ?? false))
+                    .help("Writes the .lrc, .srt and .txt with your changes (⌘S)")
+                    Button { if let song { model.openInTextEdit(song) } } label: { PanelLabel("TextEdit", "doc.text") }
+                        .disabled(!ready)
+                        .help("Opens the .lrc in TextEdit")
+                }
+                GridRow {
+                    Button { if let song { model.copyLyrics(song, withTimes: false) } } label: { PanelLabel("Copy Lyrics", "doc.on.doc") }
+                        .disabled(!ready)
+                    Button { if let song { model.copyLyrics(song, withTimes: true) } } label: { PanelLabel("Copy + Times", "clock") }
+                        .disabled(!ready)
+                        .help("Copies the lyrics with their times, as in an .lrc")
+                }
+                GridRow {
+                    Button { if let song { model.makeVideo(.quicktime, for: song.id) } } label: { PanelLabel("QuickTime", "play.rectangle") }
+                        .disabled(!ready || model.isWorking)
+                        .help("The song with the words as subtitles, to check the timing (QuickTime, VLC)")
+                    Button { if let song { model.makeVideo(.overlay, for: song.id) } } label: { PanelLabel("Green Screen", "rectangle.on.rectangle") }
+                        .disabled(!ready || model.isWorking)
+                        .help("White words on pure green, no sound: lay it over your pictures in iMovie")
+                }
+                GridRow {
+                    Button { if let song { model.transcribeAgain(song.id) } } label: { PanelLabel("Transcribe Again", "arrow.clockwise") }
+                        .disabled(song == nil || song?.isBusy == true || model.isWorking)
+                        .help("Listens to the song again. Your edits are never overwritten: the new version goes to separate .whisper files.")
+                        .gridCellColumns(2)
+                }
+            }
+            if let job = model.videoJob, model.videoProgress == nil {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text(job).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        }
+        .controlSize(.regular)
+    }
+}
+
+/// The lyric video, in its own column: the settings scroll, the Make button stays at the bottom.
+struct LyricVideoPanel: View {
+    @EnvironmentObject var model: LyricsModel
+
+    var body: some View {
+        let ready = model.selectedSong?.state == .done
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Lyric Video").font(.title3.bold())
+                    LyricVideoSettings()
+                }
+                .padding(16)
+            }
+            Divider()
+            MakeSection().padding(16)
+                .background(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        }
+        .disabled(!ready || (model.isWorking && model.videoProgress == nil))
+    }
+}
+
+/// Bottom of the lyric video column, always in sight: how many videos, and the big Make button.
+struct MakeSection: View {
+    @EnvironmentObject var model: LyricsModel
+
+    var body: some View {
+        let count = model.clipIsRandom ? max(1, min(model.clipCount, 50)) : 1
+        VStack(alignment: .leading, spacing: 10) {
+            if model.clipIsRandom {
+                HStack(spacing: 6) {
+                    Text("Number of videos:")
+                    TextField("", value: $model.clipCount, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder).frame(width: 44).multilineTextAlignment(.trailing)
+                        .onSubmit { NSApp.keyWindow?.makeFirstResponder(nil) }
+                    Stepper("", value: $model.clipCount, in: 1...50).labelsHidden()
+                    Spacer(minLength: 0)
+                }
+                Hint("Each video gets its own random draw.")
+            }
+            if let progress = model.videoProgress {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(model.videoJob ?? "").font(.callout)
+                    ProgressView(value: progress)
+                    HStack {
+                        Text("\(Int(progress * 100)) % · \(model.elapsed) s").font(.caption).foregroundStyle(.secondary)
+                            .monospacedDigit()
+                        Spacer()
+                        Button("Stop") { model.stopEverything() }
+                    }
+                }
+            } else {
+                Button { if let song = model.selectedSong { model.makeLyricVideos(for: song.id) } } label: {
                     HStack(spacing: 10) {
-                        Image(systemName: "folder.fill").font(.title2)
+                        Image(systemName: "film.fill").font(.title2)
                         VStack(alignment: .leading, spacing: 1) {
-                            Text("Show in Finder").font(.headline)
-                            Text("The lyrics and videos of this song").font(.caption).opacity(0.85)
+                            Text(count == 1 ? "Make the Video" : "Make \(count) Videos").font(.headline)
+                            Text(model.clipPictures.isEmpty ? "Choose the pictures first"
+                                 : "\(model.clipFormat.rawValue) · \(model.clipShort)p · \(model.clipPictures.count) pictures")
+                                .font(.caption).opacity(0.85)
                         }
                         Spacer(minLength: 0)
                     }
@@ -1355,197 +1724,197 @@ struct PostPanel: View {
                     .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
-                .tint(Color(red: 0.13, green: 0.62, blue: 0.42))
+                .tint(Color(red: 0.93, green: 0.45, blue: 0.13))
                 .controlSize(.extraLarge)
-                .disabled(song == nil)
-                .help("Opens the song’s lyrics folder in the Finder, with the latest file selected")
-
-                section("Lyrics") {
-                    Button { model.saveSelected() } label: {
-                        PanelLabel(song?.dirty == true ? "Save Changes" : "Saved", "square.and.arrow.down")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!(song?.dirty ?? false))
-                    .help("Writes the .lrc, .srt and .txt with your changes (⌘S)")
-                    Button { if let song { model.copyLyrics(song, withTimes: false) } } label: {
-                        PanelLabel("Copy Lyrics", "doc.on.doc")
-                    }
-                    .disabled(!ready)
-                    Button { if let song { model.copyLyrics(song, withTimes: true) } } label: {
-                        PanelLabel("Copy with Times", "clock")
-                    }
-                    .disabled(!ready)
-                    Button { if let song { model.openInTextEdit(song) } } label: {
-                        PanelLabel("Open in TextEdit", "doc.text")
-                    }
-                    .disabled(!ready)
-                }
-
-                section("Lyric Video") {
-                    LyricVideoSettings()
-                    Divider()
-                    // 1. choose the pictures (nothing starts yet)
-                    Button { model.chooseClipPictures() } label: {
-                        PanelLabel(model.clipPictures.isEmpty ? "Choose Pictures…" : "Choose Other Pictures…", "photo.on.rectangle.angled")
-                    }
-                    .help("One picture, several, or a folder. They follow the order of their file names, and change where the lyrics change.")
-                    HStack {
-                        Text(model.clipPictures.isEmpty ? "No pictures chosen yet."
-                             : model.clipPictures.count == 1 ? "1 picture chosen: \(model.clipPictures[0].lastPathComponent)"
-                             : "\(model.clipPictures.count) pictures chosen")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        Spacer()
-                        if !model.clipPictures.isEmpty {
-                            Button("Clear") { model.clipPictures = [] }.buttonStyle(.borderless).font(.caption)
-                        }
-                    }
-                    // 2. how many videos (only meaningful when each one is drawn at random)
-                    if model.clipIsRandom {
-                        HStack(spacing: 6) {
-                            Text("Number of videos:")
-                            TextField("", value: $model.clipCount, format: .number.grouping(.never))
-                                .textFieldStyle(.roundedBorder).frame(width: 44).multilineTextAlignment(.trailing)
-                                .onSubmit { NSApp.keyWindow?.makeFirstResponder(nil) }
-                            Stepper("", value: $model.clipCount, in: 1...50).labelsHidden()
-                        }
-                        Text("Each video gets its own random draw.").font(.caption).foregroundStyle(.secondary)
-                    }
-                    // 3. run
-                    let count = model.clipIsRandom ? max(1, min(model.clipCount, 50)) : 1
-                    Button { if let song { model.makeLyricVideos(for: song.id) } } label: {
-                        PanelLabel(count == 1 ? "Make the Video" : "Make \(count) Videos", "play.fill")
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(model.clipPictures.isEmpty || model.isWorking || !Paths.hasVideoTools)
-                    if model.clipOriginalSound {
-                        Toggle("Also in MP4", isOn: $model.clipAlsoMP4).toggleStyle(.checkbox)
-                        Text("A WAV song makes a .mov, which Discord and some sites refuse. This adds an .mp4 beside it (same picture, AAC sound).")
-                            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                    }
-                    if !Paths.hasVideoTools {
-                        Text("Lyric videos need Python with numpy and Pillow. In Terminal: python3 -m pip install --user numpy pillow")
-                            .font(.caption).foregroundStyle(.orange).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                    }
-                    if let progress = model.videoProgress {
-                        VStack(alignment: .leading, spacing: 4) {
-                            ProgressView(value: progress)
-                            HStack {
-                                Text("\(Int(progress * 100)) % · \(model.elapsed) s").font(.caption).foregroundStyle(.secondary)
-                                    .monospacedDigit()
-                                Spacer()
-                                Button("Stop") { model.stopEverything() }.controlSize(.small)
-                            }
-                        }
-                    }
-                }
-                .disabled(!ready || (model.isWorking && model.videoProgress == nil))
-
-                section("Other Videos") {
-                    Button { if let song { model.makeVideo(.quicktime, for: song.id) } } label: {
-                        PanelLabel("QuickTime Video", "play.rectangle")
-                    }
-                    .help("The song with the words as subtitles, to check the timing (QuickTime, VLC)")
-                    Button { if let song { model.makeVideo(.overlay, for: song.id) } } label: {
-                        PanelLabel("iMovie Green Screen", "rectangle.on.rectangle")
-                    }
-                    .help("White words on pure green, no sound: lay it over your pictures in iMovie")
-                    if let job = model.videoJob, model.videoProgress == nil {
-                        HStack(spacing: 8) {
-                            ProgressView().controlSize(.small)
-                            Text(job).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .disabled(!ready || model.isWorking)
-
-                section("Transcription") {
-                    Button { if let song { model.transcribeAgain(song.id) } } label: {
-                        PanelLabel("Transcribe Again", "arrow.clockwise")
-                    }
-                    .disabled(song == nil || song?.isBusy == true || model.isWorking)
-                    Text("Your edits are never overwritten: a new transcription of an edited song goes to separate .whisper files.")
-                        .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
+                .disabled(model.clipPictures.isEmpty || model.isWorking || model.videoTools != true)
             }
-            .padding(16)
-            .controlSize(.large)
-        }
-    }
-
-    private func section<Content: View>(_ title: String, @ViewBuilder _ content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(title.uppercased()).font(.caption.weight(.semibold)).foregroundStyle(.secondary).tracking(0.8)
-            content()
+            if model.videoTools == false {
+                Text("Lyric videos need Python with numpy and Pillow. In Terminal: python3 -m pip install --user numpy pillow")
+                    .font(.caption).foregroundStyle(.orange).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 }
 
-/// The settings of the lyric video: frame, cropping, Ken Burns, cuts on the beat.
+/// The settings of the lyric video, in sections.
 struct LyricVideoSettings: View {
     @EnvironmentObject var model: LyricsModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            FormatPicker(selection: $model.clipFormat)
-            Text(model.clipFormat.help).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-
-            Toggle("Crop pictures to fill the frame", isOn: $model.clipCrop).toggleStyle(.checkbox)
-            Text(model.clipCrop ? "Pictures of another shape are cropped." : "Each picture is shown whole, with black bars where it does not fill the frame.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-
-            Toggle("Ken Burns effect", isOn: $model.kenBurns).toggleStyle(.checkbox)
-            if model.kenBurns {
-                VStack(spacing: 2) {
-                    Slider(value: $model.kenBurnsAmount, in: 0...1).controlSize(.small)
-                    HStack {
-                        Text("Very light"); Spacer()
-                        Text("zoom \(Int((4 + 21 * model.kenBurnsAmount).rounded())) %").monospacedDigit(); Spacer()
-                        Text("Pronounced")
+        HStack(alignment: .top, spacing: 0) {
+          // left half: what goes in (pictures, frame, movement)
+          VStack(alignment: .leading, spacing: 16) {
+            PanelSection(title: "Pictures", first: true) {
+                // big and outlined, so that it is found at once
+                Button { model.chooseClipPictures() } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "photo.on.rectangle.angled").font(.title2)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(model.clipPictures.isEmpty ? "Choose Pictures…" : "Choose Other Pictures…").font(.headline)
+                            Text(model.clipPictures.isEmpty ? "One, several, or a folder"
+                                 : model.clipPictures.count == 1 ? "Now: \(model.clipPictures[0].lastPathComponent)"
+                                 : "Now: \(model.clipPictures.count) pictures")
+                                .font(.caption).opacity(0.85).lineLimit(1).truncationMode(.middle)
+                        }
+                        Spacer(minLength: 0)
                     }
-                    .font(.caption).foregroundStyle(.secondary)
+                    .padding(.vertical, 6).padding(.horizontal, 4)
+                    .frame(maxWidth: .infinity)
                 }
-                ShareRow(label: "On", value: $model.kenBurnsShare, unit: "% of the pictures")
-                Text("The chosen pictures slowly zoom in or out and drift in a straight line; the others stay still. Moving pictures take longer to make.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .buttonStyle(.borderedProminent)
+                .tint(Color(red: 0.36, green: 0.42, blue: 0.95))
+                .controlSize(.extraLarge)
+                .help("One picture, several, or a folder. They follow the order of their file names, and change where the lyrics change.")
+                if !model.clipPictures.isEmpty {
+                    Button("Clear the pictures") { model.clipPictures = [] }.buttonStyle(.link).font(.caption)
+                }
+                HStack(spacing: 6) {
+                    Toggle("Pick at random:", isOn: $model.clipPick).toggleStyle(.checkbox)
+                    TextField("", value: $model.clipPickCount, format: .number.grouping(.never))
+                        .textFieldStyle(.roundedBorder).frame(width: 50).multilineTextAlignment(.trailing)
+                        .disabled(!model.clipPick)
+                        .onSubmit { NSApp.keyWindow?.makeFirstResponder(nil) }
+                    Text("pictures").foregroundStyle(model.clipPick ? .primary : .secondary)
+                }
+                Toggle("Shuffle the order", isOn: $model.clipShuffle).toggleStyle(.checkbox)
+                Hint(model.clipPick
+                     ? "Select many pictures: \(model.clipPickCount) of them are drawn at random, a new draw every time. " + (model.clipShuffle ? "Their order is mixed too." : "They keep the order of their names.")
+                     : model.clipShuffle ? "The pictures come in a random order, a new one every time." : "All the chosen pictures are used, in the order of their names.")
             }
 
-            Toggle("Crossfades", isOn: $model.crossfades).toggleStyle(.checkbox)
-            if model.crossfades {
-                ShareRow(label: "On", value: $model.crossfadeShare, unit: "% of the cuts")
-                Text("These pictures dissolve into the next one (1 second, shorter between quick pictures); the other cuts stay sharp.")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            PanelSection(title: "Format") {
+                FormatPicker(selection: $model.clipFormat)
+                Picker("", selection: $model.clipShort) {
+                    Text("1080p").tag(1080)
+                    Text("720p").tag(720)
+                }
+                .pickerStyle(.segmented).labelsHidden()
+                .help("1080p: full HD, the best picture. 720p: smaller files, quicker to make and to send.")
+                Hint(model.clipFormat.help)
+                Toggle("Crop pictures to fill the frame", isOn: $model.clipCrop).toggleStyle(.checkbox)
+                Hint(model.clipCrop ? "Pictures of another shape are cropped." : "Each picture is shown whole, with black bars where it does not fill the frame.")
             }
 
-            Toggle("Show the words", isOn: $model.clipWords).toggleStyle(.checkbox)
-            Text(model.selectedSong?.lines.isEmpty == true ? "No words in this song: the video has the pictures and the sound only."
-                 : model.clipWords ? "The lyrics are drawn over the pictures."
-                 : "Pictures and sound only, to add your own titles in iMovie. The cuts still follow the lyrics.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-
-            Toggle("Keep the original sound", isOn: $model.clipOriginalSound).toggleStyle(.checkbox)
-            Text(model.clipOriginalSound ? "The song’s own sound, untouched. From a WAV the video is a .mov (QuickTime and iMovie read it)."
-                 : "Compressed sound (AAC 320 kb/s) in an .mp4, smaller and readable everywhere.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-
-            HStack(spacing: 6) {
-                Toggle("Pick at random:", isOn: $model.clipPick).toggleStyle(.checkbox)
-                TextField("", value: $model.clipPickCount, format: .number.grouping(.never))
-                    .textFieldStyle(.roundedBorder).frame(width: 50).multilineTextAlignment(.trailing)
-                    .disabled(!model.clipPick)
-                    .onSubmit { NSApp.keyWindow?.makeFirstResponder(nil) }
-                Text("pictures").foregroundStyle(model.clipPick ? .primary : .secondary)
+            PanelSection(title: "Movement") {
+                Toggle("Ken Burns effect", isOn: $model.kenBurns).toggleStyle(.checkbox)
+                if model.kenBurns {
+                    VStack(spacing: 2) {
+                        Slider(value: $model.kenBurnsAmount, in: 0...1).controlSize(.small)
+                        HStack {
+                            Text("Very light"); Spacer()
+                            Text("zoom \(Int((4 + 21 * model.kenBurnsAmount).rounded())) %").monospacedDigit(); Spacer()
+                            Text("Pronounced")
+                        }
+                        .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ShareRow(label: "On", value: $model.kenBurnsShare, unit: "% of the pictures")
+                    Hint("The chosen pictures slowly zoom in or out and drift in a straight line; the others stay still. Moving pictures take longer to make.")
+                }
+                Toggle("Crossfades", isOn: $model.crossfades).toggleStyle(.checkbox)
+                if model.crossfades {
+                    ShareRow(label: "On", value: $model.crossfadeShare, unit: "% of the cuts")
+                    Hint("These pictures dissolve into the next one (1 second, shorter between quick pictures); the other cuts stay sharp.")
+                }
+                Toggle("Cut on the beat", isOn: $model.cutOnBeat).toggleStyle(.checkbox)
+                    .disabled(model.selectedSong?.bpm == nil)
+                Hint(model.selectedSong?.bpm == nil ? "Waiting for the tempo of this song."
+                     : "Each change of picture lands on a beat, as close as possible to a change of lyrics.")
+                HStack(spacing: 6) {
+                    Toggle("Pulse on the beat", isOn: $model.beatPulse).toggleStyle(.checkbox)
+                        .disabled(model.selectedSong?.bpm == nil)
+                    Spacer(minLength: 0)
+                    Picker("", selection: $model.pulseFlash) {
+                        Text("Zoom").tag(false)
+                        Text("Flash").tag(true)
+                    }
+                    .labelsHidden().fixedSize().disabled(!model.beatPulse)
+                }
+                if model.beatPulse {
+                    ShareRow(label: "Strength", value: $model.pulseStrength, unit: "%")
+                    Picker("", selection: $model.pulseEvery) {
+                        Text("Every beat").tag(1)
+                        Text("Every 2nd").tag(2)
+                        Text("Every bar").tag(4)
+                    }
+                    .pickerStyle(.segmented).labelsHidden()
+                    Hint(model.pulseFlash ? "A short white flash on the beat, gone in a third of a second."
+                         : "A short push of the picture on the beat (up to 8 % at full strength), gone in a third of a second. The words stay still.")
+                }
             }
-            Toggle("Shuffle the order", isOn: $model.clipShuffle).toggleStyle(.checkbox)
-            Text(model.clipPick
-                 ? "Select many pictures: \(model.clipPickCount) of them are drawn at random, a new draw every time. " + (model.clipShuffle ? "Their order is mixed too." : "They keep the order of their names.")
-                 : model.clipShuffle ? "The pictures come in a random order, a new one every time." : "All the chosen pictures are used, in the order of their names.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 
-            Toggle("Cut on the beat", isOn: $model.cutOnBeat).toggleStyle(.checkbox)
-                .disabled(model.selectedSong?.bpm == nil)
-            Text(model.selectedSong?.bpm == nil ? "Waiting for the tempo of this song."
-                 : "With several pictures, each change of picture lands on a beat, as close as possible to a change of lyrics.")
-                .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+          }
+          .frame(maxWidth: .infinity, alignment: .topLeading).padding(.trailing, 14)
+          Divider()
+          // right half: how it starts and ends, how the words look and sound
+          VStack(alignment: .leading, spacing: 16) {
+            PanelSection(title: "Start", first: true) {
+                HStack(spacing: 6) {
+                    Toggle("Fade in from", isOn: $model.fadeIn).toggleStyle(.checkbox)
+                    Picker("", selection: $model.fadeInWhite) {
+                        Text("black").tag(false)
+                        Text("white").tag(true)
+                    }
+                    .labelsHidden().fixedSize().disabled(!model.fadeIn)
+                    SecondsField(value: $model.fadeInSeconds).disabled(!model.fadeIn)
+                }
+                Toggle("Title", isOn: $model.showTitle).toggleStyle(.checkbox)
+                if model.showTitle {
+                    HStack(spacing: 6) {
+                        Text("Appears after")
+                        SecondsField(value: $model.titleDelay)
+                        Text("for")
+                        SecondsField(value: $model.titleSeconds)
+                    }
+                    .font(.callout)
+                    TextField("Title (empty: none)", text: $model.titleText)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { NSApp.keyWindow?.makeFirstResponder(nil) }
+                        .help("Not remembered: each song gets its own.")
+                    TextField("Second line, smaller (empty: none)", text: $model.subtitleText)
+                        .textFieldStyle(.roundedBorder)
+                        .onSubmit { NSApp.keyWindow?.makeFirstResponder(nil) }
+                        .help("Remembered from one video to the next.")
+                    Hint("Only what you type is shown: an empty line shows nothing. The title fades in and out on its own; a title too long for the picture is made smaller. It uses the words’ font and colours.")
+                }
+            }
+
+            PanelSection(title: "End") {
+                HStack(spacing: 6) {
+                    Toggle("Fade to", isOn: $model.endFade).toggleStyle(.checkbox)
+                    Picker("", selection: $model.endFadeWhite) {
+                        Text("black").tag(false)
+                        Text("white").tag(true)
+                    }
+                    .labelsHidden().fixedSize().disabled(!model.endFade)
+                    SecondsField(value: $model.endFadeSeconds).disabled(!model.endFade)
+                }
+                HStack(spacing: 6) {
+                    Toggle("Fade the sound out", isOn: $model.soundFade).toggleStyle(.checkbox)
+                    Spacer(minLength: 0)
+                    SecondsField(value: $model.soundFadeSeconds).disabled(!model.soundFade)
+                }
+                Hint("The picture and the words fade to black or white, the sound fades to silence, each over the last seconds you give.")
+            }
+
+            PanelSection(title: "Words Style") {
+                WordsStyleSettings()
+            }
+
+            PanelSection(title: "Words and Sound") {
+                Toggle("Show the words", isOn: $model.clipWords).toggleStyle(.checkbox)
+                Hint(model.selectedSong?.lines.isEmpty == true ? "No words in this song: the video has the pictures and the sound only."
+                     : model.clipWords ? "The lyrics are drawn over the pictures."
+                     : "Pictures and sound only, to add your own titles in iMovie. The cuts still follow the lyrics.")
+                Toggle("Keep the original sound", isOn: $model.clipOriginalSound).toggleStyle(.checkbox)
+                Hint(model.clipOriginalSound ? "The song’s own sound, untouched. From a WAV the video is a .mov (QuickTime and iMovie read it)."
+                     : "Compressed sound (AAC 320 kb/s) in an .mp4, smaller and readable everywhere.")
+                if model.clipOriginalSound {
+                    Toggle("Also in MP4", isOn: $model.clipAlsoMP4).toggleStyle(.checkbox)
+                    Hint("A .mov is refused by Discord and some sites: this adds an .mp4 beside it (same picture, AAC sound).")
+                }
+            }
+          }
+          .frame(maxWidth: .infinity, alignment: .topLeading).padding(.leading, 14)
         }
         .controlSize(.regular)
     }
@@ -1597,6 +1966,154 @@ struct FormatIcon: View {
         .frame(width: 44, height: 46)
         .background(RoundedRectangle(cornerRadius: 6).fill(selected ? Color.accentColor.opacity(0.08) : Color.clear))
         .contentShape(Rectangle())
+    }
+}
+
+/// The fonts offered first: chosen to stay readable over pictures. Any other font of the Mac can be picked too.
+enum FontChoice {
+    static let curated: [(name: String, postScript: String)] = [
+        ("Avenir Next", ""), ("Futura", "Futura-Medium"), ("Gill Sans", "GillSans-SemiBold"),
+        ("Optima", "Optima-Bold"), ("Didot", "Didot-Bold"), ("Baskerville", "Baskerville-SemiBold"),
+        ("Copperplate", "Copperplate-Bold"), ("American Typewriter", "AmericanTypewriter-Semibold"),
+        ("Marker Felt", "MarkerFelt-Wide"), ("Snell Roundhand", "SnellRoundhand-Bold"),
+    ]
+
+    /// Every font family of the Mac, each as its sturdiest regular face (a semi-bold if it has one).
+    static let allFamilies: [(name: String, postScript: String)] = NSFontManager.shared.availableFontFamilies
+        .filter { !$0.hasPrefix(".") }
+        .compactMap { family in
+            let font = NSFontManager.shared.font(withFamily: family, traits: [], weight: 8, size: 24)
+                ?? NSFontManager.shared.font(withFamily: family, traits: [], weight: 5, size: 24)
+            return font.map { (family, $0.fontName) }
+        }
+
+    static func displayName(_ postScript: String) -> String {
+        if postScript.isEmpty { return "Avenir Next" }
+        return curated.first { $0.postScript == postScript }?.name
+            ?? NSFont(name: postScript, size: 12)?.familyName ?? postScript
+    }
+
+    /// The font's file, and its place in the file when it is a collection (.ttc): what Pillow needs.
+    static func file(of postScript: String) -> (url: URL, index: Int)? {
+        guard !postScript.isEmpty else { return nil }
+        let font = CTFontCreateWithName(postScript as CFString, 24, nil)
+        guard let url = CTFontCopyAttribute(font, kCTFontURLAttribute) as? URL else { return nil }
+        let faces = (CTFontManagerCreateFontDescriptorsFromURL(url as CFURL) as? [CTFontDescriptor]) ?? []
+        let index = faces.firstIndex { (CTFontDescriptorCopyAttribute($0, kCTFontNameAttribute) as? String) == postScript } ?? 0
+        return (url, index)
+    }
+}
+
+/// "#RRGGBB" <-> a SwiftUI colour, for the colour wells.
+func colourBinding(_ hex: Binding<String>) -> Binding<Color> {
+    Binding(
+        get: {
+            let v = Int(hex.wrappedValue.trimmingCharacters(in: CharacterSet(charactersIn: "#")), radix: 16) ?? 0xFFFFFF
+            return Color(red: Double((v >> 16) & 255) / 255, green: Double((v >> 8) & 255) / 255, blue: Double(v & 255) / 255)
+        },
+        set: { colour in
+            let c = NSColor(colour).usingColorSpace(.sRGB) ?? .white
+            hex.wrappedValue = String(format: "#%02X%02X%02X", Int((c.redComponent * 255).rounded()),
+                                      Int((c.greenComponent * 255).rounded()), Int((c.blueComponent * 255).rounded()))
+        })
+}
+
+/// Font, size, colours, band and place of the words (the title follows the same font and colours).
+struct WordsStyleSettings: View {
+    @EnvironmentObject var model: LyricsModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text("Font")
+                Spacer()
+                Menu(FontChoice.displayName(model.wordsFont)) {
+                    ForEach(FontChoice.curated, id: \.postScript) { choice in
+                        Button(choice.name) { model.wordsFont = choice.postScript }
+                    }
+                    Divider()
+                    Menu("All Fonts") {
+                        ForEach(FontChoice.allFamilies, id: \.postScript) { choice in
+                            Button(choice.name) { model.wordsFont = choice.postScript }
+                        }
+                    }
+                }
+                .fixedSize()
+            }
+            HStack(spacing: 6) {
+                Text("Size")
+                Slider(value: $model.textScale, in: 0.3...1.8).controlSize(.small)
+                Text("\(Int((model.textScale * 100).rounded())) %").monospacedDigit().foregroundStyle(.secondary).frame(width: 44, alignment: .trailing)
+            }
+            HStack(spacing: 12) {
+                ColorPicker("Words", selection: colourBinding($model.textColour), supportsOpacity: false)
+                ColorPicker("Outline", selection: colourBinding($model.outlineColour), supportsOpacity: false)
+                Spacer(minLength: 0)
+                Button("Reset") {
+                    model.wordsFont = ""; model.textScale = 0.6; model.textColour = "#FFFFFF"; model.outlineColour = "#000000"
+                    model.band = 120; model.wordsPosition = "bottom"
+                }
+                .buttonStyle(.link).font(.caption)
+                .help("Back to white Avenir Next at 60 %, with a black outline, at the bottom, on a light band")
+            }
+            HStack {
+                Text("Band")
+                Spacer()
+                Picker("", selection: $model.band) {
+                    Text("None").tag(0)
+                    Text("Light").tag(120)
+                    Text("Strong").tag(200)
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+            }
+            HStack {
+                Text("Place")
+                Spacer()
+                Picker("", selection: $model.wordsPosition) {
+                    Text("Top").tag("top")
+                    Text("Middle").tag("middle")
+                    Text("Bottom").tag("bottom")
+                }
+                .pickerStyle(.segmented).labelsHidden().fixedSize()
+            }
+            // the preview: the first chosen picture (or a grey gradient) and a line of this song
+            ZStack {
+                if let image = model.preview {
+                    Image(nsImage: image).resizable().aspectRatio(contentMode: .fit)
+                } else {
+                    Rectangle().fill(Color.secondary.opacity(0.15)).aspectRatio(16 / 9, contentMode: .fit)
+                }
+                if model.previewing { ProgressView().controlSize(.small) }
+            }
+            .frame(maxWidth: .infinity, maxHeight: 220)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.secondary.opacity(0.3)))
+            .onTapGesture { model.makePreview() }
+            .help("A still of the video with these settings. Click to redraw it.")
+            Hint("The band is the soft shade behind the words. The preview shows the first chosen picture and a line of this song.")
+        }
+        .onChange(of: model.selection) { _, _ in model.schedulePreview() }
+        .onChange(of: model.clipPictures) { _, _ in model.schedulePreview() }
+        .onChange(of: model.clipFormat) { _, _ in model.schedulePreview() }
+        .onChange(of: model.clipCrop) { _, _ in model.schedulePreview() }
+        .onChange(of: model.titleText) { _, _ in model.schedulePreview() }
+        .onChange(of: model.subtitleText) { _, _ in model.schedulePreview() }
+        .onChange(of: model.showTitle) { _, _ in model.schedulePreview() }
+    }
+}
+
+/// "[ 3 ] s": a duration in seconds, typed.
+struct SecondsField: View {
+    @Binding var value: Double
+
+    var body: some View {
+        HStack(spacing: 3) {
+            TextField("", value: Binding(get: { value }, set: { value = min(60, max(0, $0)) }),
+                      format: .number.precision(.fractionLength(0...1)))
+                .textFieldStyle(.roundedBorder).frame(width: 40).multilineTextAlignment(.trailing)
+                .onSubmit { NSApp.keyWindow?.makeFirstResponder(nil) }
+            Text("s")
+        }
     }
 }
 
