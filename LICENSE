@@ -1,0 +1,33 @@
+MIT License
+
+Copyright (c) 2026 Jean-Pascal (Quick-Eyed Sky)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+This project is an unofficial front-end. It does not include the YuE2 model
+or its code, and it is not affiliated with or endorsed by the YuE / m-a-p
+team. The MIT licence above covers this front-end only.
+
+The model weights (ahmadw/YuE2-3B-MLX, an Apple Silicon port of m-a-p/YuE2-3B
+and m-a-p/YuE2-Vae) are downloaded separately by you and are licensed
+CC BY-NC 4.0 (non-commercial) by their original authors:
+https://huggingface.co/ahmadw/YuE2-3B-MLX
+https://github.com/multimodal-art-projection/YuE
